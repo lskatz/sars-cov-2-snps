@@ -16,11 +16,11 @@ exit(main());
 sub main{
   my $settings={};
   GetOptions($settings,qw(help outdir=s tempdir=s)) or die $!;
-  die usage() if($$settings{help} || @ARGV < 3);
+  die usage() if($$settings{help} || @ARGV < 2);
   $$settings{tempdir} //= tempdir("$0.XXXXXX", CLEANUP=>1, TMPDIR=>1);
   $$settings{outdir} //= "./$0.out";
 
-  for my $exec(qw(ivar cutadapt bowtie2-build samtools bcftools)){
+  for my $exec(qw(cutadapt bowtie2-build samtools bcftools tabix bgzip)){
     my $path = which($exec);
     if(!$path){
       die "ERROR: could not find $exec in PATH";
@@ -45,6 +45,10 @@ sub main{
     }
 
     logmsg "Workflow on $R1 / $R2";
+    if(-e "$$settings{outdir}/".basename($R1).".fasta"){
+      logmsg "SKIP: found $$settings{outdir}/".basename($R1).".fasta";
+      next;
+    }
     my $res = singleSampleWorkflow($R1, $R2, $ref, $settings);
     $result{$R1} = $res;
 
@@ -113,33 +117,36 @@ sub snps{
   my($bam, $ref, $settings) = @_;
 
   my $vcf = "$$settings{tempdir}/".basename($bam,".bam").".vcf";
+  my $gcf = $vcf; # vcf.gz
+     $gcf =~ s/vcf$/vcf.gz/;
 
-  if(-e $vcf){
-    logmsg "SKIP: found $vcf";
-    return $vcf;
+  if(-e "$gcf.tbi"){
+    logmsg "SKIP: found $gcf.tbi";
+    return $gcf;
   }
 
-  # Create vcf but put into a tmp file just in case of error
-  system("samtools mpileup -aa -d 8000 -uf $ref $bam | bcftools call -Mc > $vcf.tmp");
+  system("samtools mpileup -aa -d 8000 -uf $ref $bam | bcftools call -Mc > $vcf");
   die if $?;
 
-  # Create the final file
-  mv("$vcf.tmp", $vcf);
+  system("bgzip $vcf"); # creates vcf.gz
+  die if $?;
+  system("tabix -f $gcf"); # Creates vcf.gz.tbi
+  die if $?;
 
-  return $vcf;
+  return $gcf;
 }
 
 sub consensus{
   my($vcf, $ref, $settings) = @_;
 
-  my $consensusfasta = "$$settings{tempdir}/".basename($vcf,".vcf").".fasta";
+  my $consensusfasta = "$$settings{tempdir}/".basename($vcf,".vcf.gz").".fasta";
 
   if(-e $consensusfasta){
     logmsg "SKIP: found $consensusfasta";
     return $consensusfasta;
   }
 
-  system("cat $vcf | vcfutils.pl vcf2fq -d 100 -D 100000000 | seqtk seq -A - | sed '2~2s/[actg]/N/g' > $consensusfasta.tmp");
+  system("zcat $vcf | vcfutils.pl vcf2fq -d 100 -D 100000000 | seqtk seq -A - | sed '2~2s/[actg]/N/g' > $consensusfasta.tmp");
 
   mv("$consensusfasta.tmp", $consensusfasta);
 
