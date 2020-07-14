@@ -15,7 +15,7 @@ exit(main());
 
 sub main{
   my $settings={};
-  GetOptions($settings,qw(help tempdir=s)) or die $!;
+  GetOptions($settings,qw(help outdir=s tempdir=s)) or die $!;
   die usage() if($$settings{help} || @ARGV < 3);
   $$settings{tempdir} //= tempdir("$0.XXXXXX", CLEANUP=>1, TMPDIR=>1);
   $$settings{outdir} //= "./$0.out";
@@ -27,6 +27,7 @@ sub main{
     }
   }
 
+  mkdir $$settings{outdir};
   my $ref = shift(@ARGV);
   my %result;
   while(@ARGV){
@@ -46,6 +47,9 @@ sub main{
     logmsg "Workflow on $R1 / $R2";
     my $res = singleSampleWorkflow($R1, $R2, $ref, $settings);
     $result{$R1} = $res;
+
+    logmsg "vcf:   $$res{vcf}";
+    logmsg "fasta: $$res{fasta}";
   }
 
   return 0;
@@ -61,8 +65,8 @@ sub singleSampleWorkflow{
 
   my $outfasta = "$$settings{outdir}/".basename($fasta);
   my $outvcf   = "$$settings{outdir}/".basename($vcf);
-  cp($fasta, $outfasta);
-  cp($vcf  , $outvcf);
+  cp($fasta, $outfasta) or die "ERROR copying $fasta => $outfasta: $!";
+  cp($vcf  , $outvcf) or die "ERROR copying $vcf => $outvcf: $!";
 
   return {vcf=>$outvcf, fasta=>$outfasta};
 }
