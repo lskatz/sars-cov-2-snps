@@ -7,6 +7,7 @@ use Getopt::Long;
 use File::Basename qw/basename/;
 use File::Copy qw/mv cp/;
 use File::Temp qw/tempdir/;
+use File::Which qw/which/;
 
 local $0 = basename $0;
 sub logmsg{local $0=basename $0; print STDERR "$0: @_\n";}
@@ -19,15 +20,33 @@ sub main{
   $$settings{tempdir} //= tempdir("$0.XXXXXX", CLEANUP=>1, TMPDIR=>1);
   $$settings{outdir} //= "./$0.out";
 
-  my $ref = shift(@ARGV);
-  my %fasta;
-  while(@ARGV){
-    my($R1,$R2) = splice(@ARGV,0,2);
-    my $fasta = singleSampleWorkflow($R1, $R2, $ref, $settings);
-    $fasta{$R1} = $fasta;
+  for my $exec(qw(ivar cutadapt bowtie2-build samtools bcftools)){
+    my $path = which($exec);
+    if(!$path){
+      die "ERROR: could not find $exec in PATH";
+    }
   }
 
-  die Dumper \%fasta;
+  my $ref = shift(@ARGV);
+  my %result;
+  while(@ARGV){
+    my $R1 = shift(@ARGV);
+    my $R2 = $R1;
+       $R2 =~ s/_1\.fastq.gz$/_2.fastq.gz/;
+       # substitute R2
+    if(!-e $R2){
+      $R2 = $R1;
+      $R2 =~ s/_R1_/_R2_/;
+    }
+    if(!-e $R2 || $R1 eq $R2){
+      logmsg "SKIP: could not find R2 for $R1";
+      next;
+    }
+
+    logmsg "Workflow on $R1 / $R2";
+    my $res = singleSampleWorkflow($R1, $R2, $ref, $settings);
+    $result{$R1} = $res;
+  }
 
   return 0;
 }
@@ -36,13 +55,16 @@ sub singleSampleWorkflow{
   my($R1, $R2, $ref, $settings) = @_;
 
   my ($trimmedR1, $trimmedR2) = adapterTrim($R1, $R2, $settings);
-  my $bam = mapReads($trimmedR1, $trimmedR2, $ref, $settings);
-  my $fasta = snps($bam, $ref, $settings);
+  my $bam   = mapReads($trimmedR1, $trimmedR2, $ref, $settings);
+  my $vcf   = snps($bam, $ref, $settings);
+  my $fasta = consensus($vcf, $ref, $settings);
 
   my $outfasta = "$$settings{outdir}/".basename($fasta);
+  my $outvcf   = "$$settings{outdir}/".basename($vcf);
   cp($fasta, $outfasta);
+  cp($vcf  , $outvcf);
 
-  return $outfasta;
+  return {vcf=>$outvcf, fasta=>$outfasta};
 }
 
 sub adapterTrim{
@@ -64,6 +86,11 @@ sub mapReads{
   my $bam = $sam;
      $bam =~ s/\.sam$/.bam/;
 
+  if(-e "$bam.bai"){
+    logmsg "SKIP: found $bam.bai";
+    return $bam;
+  }
+
   my $index = "$$settings{tempdir}/bowtieindex";
   if(! -e "$index.1.bt2"){
     system("bowtie2-build $ref $index");
@@ -82,16 +109,44 @@ sub snps{
   my($bam, $ref, $settings) = @_;
 
   my $vcf = "$$settings{tempdir}/".basename($bam,".bam").".vcf";
-  my $consensusfasta = "$$settings{tempdir}/".basename($bam,".bam").".fasta";
 
-  system("samtools mpileup -aa -d 8000 -uf $ref $bam | bcftools call -Mc |tee -a $vcf | vcfutils.pl vcf2fq -d 100 -D 100000000 | seqtk seq -A - | sed '2~2s/[actg]/N/g' > $consensusfasta");
+  if(-e $vcf){
+    logmsg "SKIP: found $vcf";
+    return $vcf;
+  }
+
+  # Create vcf but put into a tmp file just in case of error
+  system("samtools mpileup -aa -d 8000 -uf $ref $bam | bcftools call -Mc > $vcf.tmp");
+  die if $?;
+
+  # Create the final file
+  mv("$vcf.tmp", $vcf);
+
+  return $vcf;
+}
+
+sub consensus{
+  my($vcf, $ref, $settings) = @_;
+
+  my $consensusfasta = "$$settings{tempdir}/".basename($vcf,".vcf").".fasta";
+
+  if(-e $consensusfasta){
+    logmsg "SKIP: found $consensusfasta";
+    return $consensusfasta;
+  }
+
+  system("cat $vcf | vcfutils.pl vcf2fq -d 100 -D 100000000 | seqtk seq -A - | sed '2~2s/[actg]/N/g' > $consensusfasta.tmp");
+
+  mv("$consensusfasta.tmp", $consensusfasta);
 
   return $consensusfasta;
 }
 
 sub usage{
   "$0: runs Clint's SNP workflow on raw illumina reads
-  Usage: $0 [options] ref.fasta R1.fastq.gz R2.fastq.gz [R1.fastq.gz R2.fastq.gz...]
+  Usage: $0 [options] ref.fasta *R1*.fastq.gz
+  R2s are found by replacing _1.fastq.gz with _2.fastq.gz
+                          or _R1_ with _R2_
   --help   This useful help menu
   --tempdir ''
   --outdir  ''
